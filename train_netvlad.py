@@ -8,7 +8,7 @@ config = edict()
 config.NUM_VLAD_CENTERS =10
 config.NUM_LABEL =500
 config.LEARNING_RATE =0.1
-config.FeaLen = 4096
+config.FEA_LEN = 4096
 
 
 def _save_model(model_prefix, rank=0):
@@ -61,7 +61,7 @@ def tensor_vstack(tensor_list, pad=0):
 
 
 class FeaDataIter(mx.io.DataIter):
-	def __init__(self, filelist, batchsize, ctx, num_classes, data_shape, dtype = 'float32', work_load_list =None):
+	def __init__(self, filelist, batchsize, ctx, num_classes ,data_shape, dtype = 'float32', work_load_list =None):
 		self.batch_size = batchsize
 		self.cur_iter = 0
 #		self.max_iter = max_iter
@@ -69,18 +69,18 @@ class FeaDataIter(mx.io.DataIter):
 		self.ctx = ctx
 		self.work_load_list = work_load_list
 		self.featuredb =[]
-		if not os.exsit(filelist):
+		if not os.path.exists(filelist):
 			raise Exception('Sorry, filelist {} not exsit.'.format(filelist))
 		f = open(filelist)
 		self.featuredb = f.readlines()
 		f.close()
-		self.max_iter = len(self.featuredb)
+		self.total= len(self.featuredb)
 		self.num_classes = num_classes
 
-#		label = np.random.randint(0, num_classes, [self.batch_size,])
-#		data = np.random.uniform(-1, 1, data_shape)
-#		self.data = mx.nd.array(data, dtype=self.dtype)
-#		self.label = mx.nd.array(label, dtype=self.dtype)
+		label = np.random.randint(0, 1, [self.batch_size,self.num_classes])
+		data = np.random.uniform(-1, 1, [self.batch_size, data_shape[0],data_shape[1]])
+		self.data = mx.nd.array(data, dtype=self.dtype)
+		self.label = mx.nd.array(label, dtype=self.dtype)
 	def __iter__(self):
 		return self
 	@property
@@ -88,7 +88,7 @@ class FeaDataIter(mx.io.DataIter):
 		return [mx.io.DataDesc('data', self.data.shape, self.dtype)]
 	@property
 	def provide_label(self):
-		return [mx.io.DataDesc('softmax_label', (self.batch_size,), self.dtype)]
+		return [mx.io.DataDesc('softmax_label', self.label.shape , self.dtype)]
 
 	def iter_next(self):
 		return self.cur + self.batch_size <= self.size
@@ -114,9 +114,10 @@ class FeaDataIter(mx.io.DataIter):
 		label_array =[]
 		data_array =[]
 		for line in iroidb:
-			datapath  = line.split(',')[0]
-			label_array.appen(line.split(",")[1])
-			data_array.append(np.formfile(datapath,dtype='float').reshape(-1,config.FeaLen))
+                    datapath  = line.split(',')[0]
+                    datapath = '/data/trainval/' + datapath +'_fc6_vgg19_frame.binary' 
+		    label_array.appen(line.split(",")[1])
+		    data_array.append(np.formfile(datapath,dtype='float').reshape(-1,config.FEA_LEN))
 
 		return data_array,label_array
 
@@ -155,30 +156,41 @@ class FeaDataIter(mx.io.DataIter):
 		self.label = mx.nd.array(label_tensor)
 
 
-def netvlad(num_centers, num_output,**kwargs):
+def netvlad(batchsize, num_centers, num_output,**kwargs):
 	input_data = mx.symbol.Variable(name="data")
-	input_centers = mx.symbol.Variable(name="centers")
+        
+	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers,config.FEA_LEN))
 
-	weights = mx.symbol.FullyConnected(name='w', data=input_data, num_hidden=num_centers)
-	softmax_weights = mx.symbol.Softmax(data=weights, axis=0,name='softmax')
+        w = mx.symbol.Variable('weights_vlad',
+                            shape=[num_centers, config.FEA_LEN])
+        b = mx.symbol.Variable('biases', shape=[1,num_centers])
+
+       
+	weights = mx.symbol.dot(name='w', lhs=input_data, rhs = w, transpose_b = True)
+        weights = mx.symbol.broadcast_sub(weights,b)
+
+	softmax_weights = mx.symbol.softmax(data=weights, axis=2,name='softmax_vald')
+#	softmax_weights = mx.symbol.SoftmaxOutput(data=weights, axis=0,name='softmax_vald')
 
 	vari_lib =[]
 
 	for i in range(num_centers):
-		y = mx.symbol.slice_axis(input_centers,0,i,None)
-		temp_w = mx.symbol.slice_axis(softmax_weights,0,i,None)
+		y = mx.symbol.slice_axis(data=input_centers,axis=0,begin=i,end=i+1)
+		temp_w = mx.symbol.slice_axis(data=softmax_weights,axis=2,begin=i,end=i+1)
 		element_sub = mx.symbol.broadcast_sub(input_data, y)
-		vari_lib.append(mx.symbol.broadcast_mul(element_sub, temp_w))
+		vari_lib.append(mx.symbol.batch_dot(element_sub, temp_w,transpose_a = True))
 
-	for i in len(vari_lib):
-		vari_lib[0] +=vari_lib[i]
+       
+	for i in range(len(vari_lib)-1):
+	    vari_lib[0] =mx.symbol.concat(vari_lib[0],vari_lib[i+1],dim=2)
 
+        
 	norm = mx.symbol.L2Normalization(vari_lib[0],mode='instance')
 	norm = mx.symbol.Flatten(norm)
 	norm = mx.symbol.L2Normalization(norm)
 
 	weights = mx.symbol.FullyConnected(name='w', data=norm, num_hidden=num_output)
-	softmax_label = mx.symbol.SoftmaxOutput(data=weights, axis=0,name='softmax_label')
+	softmax_label = mx.symbol.SoftmaxOutput(data=weights,name='softmax')
 
 	group = mx.symbol.Group([softmax_label, mx.symbol.BlockGrad(softmax_weights)])
 
@@ -224,10 +236,16 @@ def train():
 
 
 	load_epoch =0
+        gpus = '0,1'
+        top_k = 0
+        batch_size =32
+        disp_batches =40
 
-	train_data = FeaDataIter("new_train.txt")
-	val_data  = FeaDataIter("new_val.txt")
+        devs = mx.cpu() if gpus is None or gpus is '' else [
+                mx.gpu(int(i)) for i in gpus.split(',')]
 
+	train_data = FeaDataIter("new_train.txt",batch_size,devs,config.NUM_LABEL,(200,config.FEA_LEN))
+	val_data  = FeaDataIter("new_val.txt",batch_size,devs,config.NUM_LABEL,(200,config.FEA_LEN))
         print("loading data")
 	lr, lr_scheduler = _get_lr_scheduler(config.LEARNING_RATE, 0.1,0,'2,5',train_data.total)
 
@@ -236,20 +254,19 @@ def train():
 		'wd': wd,
 		'lr_scheduler': lr_scheduler}
 
-	gpus = 1,2,3,4
-	top_k = 0
-	batch_size =32
-	disp_batches =40
-
-	devs = mx.cpu() if gpus is None or gpus is '' else [
-		mx.gpu(int(i)) for i in gpus.split(',')]
-
 	checkpoint = _save_model(model_prefix, kv.rank)
 
+        sym_vlad = netvlad(batch_size,config.NUM_VLAD_CENTERS,config.NUM_LABEL)
+
+	data_shape_dict = dict(train_data.provide_data + train_data.provide_label)
+#	data_shape_dict = dict(train_data.provide_data)
+        print(data_shape_dict)
+	arg_shape, out_shape, aux_shape = sym_vlad.infer_shape(**data_shape_dict)
+        print(out_shape)
 	# create model
 	model = mx.mod.Module(
 		context=devs,
-		symbol=netvlad(config.NUM_VLAD_CENTERS,config.NUM_LABEL)
+		symbol=sym_vlad 
 	)
 
 	initializer = mx.init.Xavier(
@@ -268,11 +285,12 @@ def train():
 #	monitor = mx.mon.Monitor(args.monitor, pattern=".*") if args.monitor > 0 else None
 	monitor = None
 
-	data_shape_dict = dict(train_data.provide_data + train_data.provide_label)
+#	data_shape_dict = dict(train_data.provide_data + train_data.provide_label)
 
-	arg_shape, out_shape, aux_shape = model[1].infer_shape(**data_shape_dict)
-	fea_len = out_shape[1]
-	center = mx.nd.array(config.NUM_VLAD_CENTERS,fea_len)
+#	arg_shape, out_shape, aux_shape = model.infer_shape(**data_shape_dict)
+#        print(out_shape)
+#	fea_len = out_shape[1]
+#	center = mx.nd.array(config.NUM_VLAD_CENTERS,fea_len)
 
 #	arg_shape_dict = dict(zip(train_data.list_arguments(), arg_shape))
 #	out_shape_dict = dict(zip(train_data.list_outputs(), out_shape))
@@ -299,7 +317,7 @@ def train():
 
 
 
-if __name__ is '__main__':
+if __name__ == '__main__':
         print("aa")
 	train()
 

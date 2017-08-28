@@ -1,7 +1,7 @@
 import os 
-TrainPath = 'lsvc2017/lsvc_val.txt'
+TrainPath = 'lsvc2017/lsvc_train.txt'
 f = open(TrainPath)
-fout = open('new_val.txt','w')
+fout = open('new_train.txt','w')
 for line in f.readlines(): 
     contents = line.strip().split(',')
     for i in range(len(contents)-1):
