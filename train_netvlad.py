@@ -114,8 +114,8 @@ class FeaDataIter(mx.io.DataIter):
 		label_array =[]
 		data_array =[]
 		for line in iroidb:
-			datapath  = line.split('/t')[0]
-			label_array.appen(line.split("/t")[1])
+			datapath  = line.split(',')[0]
+			label_array.appen(line.split(",")[1])
 			data_array.append(np.formfile(datapath,dtype='float').reshape(-1,config.FeaLen))
 
 		return data_array,label_array
@@ -213,6 +213,7 @@ def _get_lr_scheduler(lr, lr_factor=None, begin_epoch = 0 ,lr_step_epochs='',epo
 
 
 def train():
+        print("training begin")
 	kv_store = 'device'
 	# kvstore
 	kv = mx.kvstore.create(kv_store)
@@ -224,9 +225,10 @@ def train():
 
 	load_epoch =0
 
-	train_data = FeaDataIter("training path")
-	val_data  = FeaDataIter("val path")
+	train_data = FeaDataIter("new_train.txt")
+	val_data  = FeaDataIter("new_val.txt")
 
+        print("loading data")
 	lr, lr_scheduler = _get_lr_scheduler(config.LEARNING_RATE, 0.1,0,'2,5',train_data.total)
 
 	optimizer_params = {
@@ -298,5 +300,6 @@ def train():
 
 
 if __name__ is '__main__':
+        print("aa")
 	train()
 
