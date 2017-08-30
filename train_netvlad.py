@@ -48,7 +48,7 @@ def tensor_vstack(tensor_list, pad=0):
             all_tensor[ind*islice:(ind+1)*islice] = tensor
     elif ndim == 2:
         for ind, tensor in enumerate(tensor_list):
-            all_tensor[ind*islice:(ind+1)*islice, :tensor.shape[1]] = tensor
+            all_tensor[ind*islice:(ind+1)*islice, tensor.shape[1]] = tensor
     elif ndim == 3:
         for ind, tensor in enumerate(tensor_list):
             all_tensor[ind*islice:(ind+1)*islice, :tensor.shape[1], :tensor.shape[2]] = tensor
@@ -74,24 +74,36 @@ class FeaDataIter(mx.io.DataIter):
 		f = open(filelist)
 		self.featuredb = f.readlines()
 		f.close()
+                self.maxshape =200
 		self.total= len(self.featuredb)
 		self.num_classes = num_classes
+                self.cur =0
 
-		label = np.random.randint(0, 1, [self.batch_size,self.num_classes])
+		label = np.random.randint(0, 1, [self.batch_size, ])
 		data = np.random.uniform(-1, 1, [self.batch_size, data_shape[0],data_shape[1]])
-		self.data = mx.nd.array(data, dtype=self.dtype)
-		self.label = mx.nd.array(label, dtype=self.dtype)
+		self.data = [mx.nd.array(data, dtype=self.dtype)]
+		self.label =[ mx.nd.array(label, dtype=self.dtype)]
 	def __iter__(self):
 		return self
 	@property
 	def provide_data(self):
-		return [mx.io.DataDesc('data', self.data.shape, self.dtype)]
+		return [mx.io.DataDesc('data', self.data[0].shape, self.dtype)]
 	@property
 	def provide_label(self):
-		return [mx.io.DataDesc('softmax_label', self.label.shape , self.dtype)]
+                print(self.label[0].shape)
+		return [mx.io.DataDesc('softmax_label', self.label[0].shape , self.dtype)]
 
 	def iter_next(self):
-		return self.cur + self.batch_size <= self.size
+		return self.cur + self.batch_size <= self.total
+
+        def getindex(self):
+            return self.cur / self.batch_size
+
+        def getpad(self):
+            if self.cur + self.batch_size > self.total:
+                return self.cur + self.batch_size - self.total
+            else:
+                return 0
 
 	def next(self):
 		if self.iter_next():
@@ -111,23 +123,36 @@ class FeaDataIter(mx.io.DataIter):
 
 
 	def get_data_label(self,iroidb):
-		label_array =[]
+                num_samples = len(iroidb)
+		label_array = []
 		data_array =[]
 		for line in iroidb:
                     datapath  = line.split(',')[0]
-                    datapath = '/data/trainval/' + datapath +'_fc6_vgg19_frame.binary' 
-		    label_array.appen(line.split(",")[1])
-		    data_array.append(np.formfile(datapath,dtype='float').reshape(-1,config.FEA_LEN))
+                    datapath = '/workspace/data/trainval/' + datapath +'_fc6_vgg19_frame.binary' 
+#                    label_tensor = np.zeros((1))
+#                    label_tensor[:] = int(line.split(",")[1])
+		    label_array.append([int(line.split(',')[1])])
+                    data = np.fromfile(datapath,dtype='float32').reshape(-1,config.FEA_LEN)
+                    data_tensor = np.zeros((self.maxshape,data.shape[1]))
+                    if data.shape[0] > self.maxshape:
+                        import random
+                        radstart = random.randint(0, data.shape[0] - self.maxshape -1 )
+                        data_tensor = data[radstart:radstart+self.maxshape]
+                    else:
+                        data_tensor[0:data.shape[0],:] = data
+#                   data_tensor[0,0,:,:] = data
+#                    print(data_tensor.shape)
+		    data_array.append(data_tensor)
 
-		return data_array,label_array
+		return np.array(data_array), np.array(label_array)
 
 
 
 	def get_batch(self):
 		# slice roidb
 		cur_from = self.cur
-		cur_to = min(cur_from + self.batch_size, self.size)
-		roidb = [self.roidb[self.index[i]] for i in range(cur_from, cur_to)]
+		cur_to = min(cur_from + self.batch_size, self.total)
+		roidb = [self.featuredb[i] for i in range(cur_from, cur_to)]
 
 		# decide multi device slice
 		work_load_list = self.work_load_list
@@ -147,23 +172,28 @@ class FeaDataIter(mx.io.DataIter):
 			data, label = self.get_data_label(iroidb)
 			data_list.append(data)
 			label_list.append(label)
-
+                #print(data_list.shape())
 		# pad data first and then assign anchor (read label)
-		data_tensor = tensor_vstack([batch for batch in data_list])
-		label_tensor = tensor_vstack([batch for batch in data_list])
+                
+		data_tensor = tensor_vstack(data_list)
+                              
+                label_tensor = np.vstack(label_list)
+#		label_tensor = [batch for batch in label_list]
 
-		self.data = mx.nd.array(data_tensor)
-		self.label = mx.nd.array(label_tensor)
+		self.data =[mx.nd.array([batch for batch in data_tensor])]
+                print('data finish')
+		self.label = [mx.nd.array([batch for batch in label_tensor])]
+                print('label finish')
 
 
 def netvlad(batchsize, num_centers, num_output,**kwargs):
 	input_data = mx.symbol.Variable(name="data")
         
-	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers,config.FEA_LEN))
+	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers,config.FEA_LEN),init = mx.init.Xavier())
 
         w = mx.symbol.Variable('weights_vlad',
-                            shape=[num_centers, config.FEA_LEN])
-        b = mx.symbol.Variable('biases', shape=[1,num_centers])
+                            shape=[num_centers, config.FEA_LEN],init= mx.initializer.Xavier())
+        b = mx.symbol.Variable('biases', shape=[1,num_centers],init = mx.initializer.Xavier())
 
        
 	weights = mx.symbol.dot(name='w', lhs=input_data, rhs = w, transpose_b = True)
@@ -200,8 +230,6 @@ def netvlad(batchsize, num_centers, num_output,**kwargs):
 def _load_model(model_prefix,load_epoch,rank=0):
 	import os
 	assert model_prefix is not None
-	if rank > 0 and os.path.exists("%s-%d-symbol.json" % (model_prefix, rank)):
-		model_prefix += "-%d" % (rank)
 	sym, arg_params, aux_params = mx.model.load_checkpoint(
 		model_prefix, load_epoch)
  #   logging.info('Loaded model %s_%04d.params', model_prefix, args.load_epoch)
@@ -277,8 +305,8 @@ def train():
 	if top_k > 0:
 		eval_metrics.append(mx.metric.create('top_k_accuracy', top_k=top_k))
 
-	if optimizer == 'sgd':
-		optimizer_params['multi_precision'] = True
+#	if optimizer == 'sgd':
+#	    optimizer_params['multi_precision'] = True
 
 	batch_end_callbacks = [mx.callback.Speedometer(batch_size, disp_batches)]
 
