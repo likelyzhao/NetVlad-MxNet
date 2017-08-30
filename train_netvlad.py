@@ -21,6 +21,10 @@ def _save_model(model_prefix, rank=0):
 	return mx.callback.do_checkpoint(model_prefix if rank == 0 else "%s-%d" % (
 		model_prefix, rank))
 
+def _test_callback(args):
+        print(args)
+        print("callbasck")
+
 
 def tensor_vstack(tensor_list, pad=0):
     """
@@ -87,10 +91,10 @@ class FeaDataIter(mx.io.DataIter):
 		return self
 	@property
 	def provide_data(self):
-		return [mx.io.DataDesc('data', self.data[0].shape, self.dtype)]
+		return [mx.io.DataDesc('data', self.data[0].shape, self.dtype,'NTC')]
 	@property
 	def provide_label(self):
-                print(self.label[0].shape)
+                #print(self.label[0].shape)
 		return [mx.io.DataDesc('softmax_label', self.label[0].shape , self.dtype)]
 
 	def iter_next(self):
@@ -143,7 +147,7 @@ class FeaDataIter(mx.io.DataIter):
 #                   data_tensor[0,0,:,:] = data
 #                    print(data_tensor.shape)
 		    data_array.append(data_tensor)
-
+                # print(label_array)
 		return np.array(data_array), np.array(label_array)
 
 
@@ -154,6 +158,7 @@ class FeaDataIter(mx.io.DataIter):
 		cur_to = min(cur_from + self.batch_size, self.total)
 		roidb = [self.featuredb[i] for i in range(cur_from, cur_to)]
 
+                batch_label = mx.nd.empty(self.provide_label[0][1])
 		# decide multi device slice
 		work_load_list = self.work_load_list
 		ctx = self.ctx
@@ -168,7 +173,7 @@ class FeaDataIter(mx.io.DataIter):
 		data_list = []
 		label_list = []
 		for islice in slices:
-			iroidb = [self.featuredb[i] for i in range(islice.start, islice.stop)]
+			iroidb = [roidb[i] for i in range(islice.start, islice.stop)]
 			data, label = self.get_data_label(iroidb)
 			data_list.append(data)
 			label_list.append(label)
@@ -178,12 +183,18 @@ class FeaDataIter(mx.io.DataIter):
 		data_tensor = tensor_vstack(data_list)
                               
                 label_tensor = np.vstack(label_list)
+                for i  in range(len(label_tensor)):
+                    label = label_tensor[i]
+                    # print(label)
+                    batch_label[i] = label
 #		label_tensor = [batch for batch in label_list]
 
+
 		self.data =[mx.nd.array([batch for batch in data_tensor])]
-                print('data finish')
-		self.label = [mx.nd.array([batch for batch in label_tensor])]
-                print('label finish')
+#                print('data finish')
+#                print(batch_label)
+		self.label = [batch_label]
+#                print('label finish')
 
 
 def netvlad(batchsize, num_centers, num_output,**kwargs):
@@ -222,9 +233,9 @@ def netvlad(batchsize, num_centers, num_output,**kwargs):
 	weights = mx.symbol.FullyConnected(name='w', data=norm, num_hidden=num_output)
 	softmax_label = mx.symbol.SoftmaxOutput(data=weights,name='softmax')
 
-	group = mx.symbol.Group([softmax_label, mx.symbol.BlockGrad(softmax_weights)])
+#	group = mx.symbol.Group([softmax_label, mx.symbol.BlockGrad(softmax_weights)])
 
-	return group
+	return softmax_label
 
 
 def _load_model(model_prefix,load_epoch,rank=0):
@@ -253,6 +264,10 @@ def _get_lr_scheduler(lr, lr_factor=None, begin_epoch = 0 ,lr_step_epochs='',epo
 
 
 def train():
+        import logging
+        logging.basicConfig()
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
         print("training begin")
 	kv_store = 'device'
 	# kvstore
@@ -265,9 +280,9 @@ def train():
 
 	load_epoch =0
         gpus = '0,1'
-        top_k = 0
-        batch_size =32
-        disp_batches =40
+        top_k = 5
+        batch_size=32
+        disp_batches =10
 
         devs = mx.cpu() if gpus is None or gpus is '' else [
                 mx.gpu(int(i)) for i in gpus.split(',')]
@@ -283,14 +298,13 @@ def train():
 		'lr_scheduler': lr_scheduler}
 
 	checkpoint = _save_model(model_prefix, kv.rank)
-
         sym_vlad = netvlad(batch_size,config.NUM_VLAD_CENTERS,config.NUM_LABEL)
 
-	data_shape_dict = dict(train_data.provide_data + train_data.provide_label)
+#	data_shape_dict = dict(train_data.provide_data + train_data.provide_label)
 #	data_shape_dict = dict(train_data.provide_data)
-        print(data_shape_dict)
-	arg_shape, out_shape, aux_shape = sym_vlad.infer_shape(**data_shape_dict)
-        print(out_shape)
+        #print(data_shape_dict)
+#	arg_shape, out_shape, aux_shape = sym_vlad.infer_shape(**data_shape_dict)
+        #print(out_shape)
 	# create model
 	model = mx.mod.Module(
 		context=devs,
@@ -300,15 +314,14 @@ def train():
 	initializer = mx.init.Xavier(
 		rnd_type='gaussian', factor_type="in", magnitude=2)
 
-
 	eval_metrics = ['accuracy']
 	if top_k > 0:
-		eval_metrics.append(mx.metric.create('top_k_accuracy', top_k=top_k))
+	    eval_metrics.append(mx.metric.create('top_k_accuracy', top_k=top_k))
 
 #	if optimizer == 'sgd':
 #	    optimizer_params['multi_precision'] = True
 
-	batch_end_callbacks = [mx.callback.Speedometer(batch_size, disp_batches)]
+	batch_end_callbacks = mx.callback.Speedometer(batch_size, disp_batches)
 
 #	monitor = mx.mon.Monitor(args.monitor, pattern=".*") if args.monitor > 0 else None
 	monitor = None
