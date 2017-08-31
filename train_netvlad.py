@@ -5,11 +5,12 @@ import os
 from easydict import EasyDict as edict
 
 config = edict()
-config.NUM_VLAD_CENTERS =10
+config.NUM_VLAD_CENTERS = 32
 config.NUM_LABEL =500
-config.LEARNING_RATE =0.1
+config.LEARNING_RATE = 0.1
 config.FEA_LEN = 4096
-
+config.MAX_SHAPE = 200
+config.BATCH_SIZE = 16
 
 def _save_model(model_prefix, rank=0):
 	import os
@@ -20,10 +21,6 @@ def _save_model(model_prefix, rank=0):
 		os.mkdir(dst_dir)
 	return mx.callback.do_checkpoint(model_prefix if rank == 0 else "%s-%d" % (
 		model_prefix, rank))
-
-def _test_callback(args):
-        print(args)
-        print("callbasck")
 
 
 def tensor_vstack(tensor_list, pad=0):
@@ -65,7 +62,7 @@ def tensor_vstack(tensor_list, pad=0):
 
 
 class FeaDataIter(mx.io.DataIter):
-	def __init__(self, filelist, batchsize, ctx, num_classes ,data_shape, dtype = 'float32', work_load_list =None):
+	def __init__(self, filelist, batchsize, ctx, num_classes ,data_shape, phase = 'train', dtype = 'float32', work_load_list =None):
 		self.batch_size = batchsize
 		self.cur_iter = 0
 #		self.max_iter = max_iter
@@ -78,11 +75,11 @@ class FeaDataIter(mx.io.DataIter):
 		f = open(filelist)
 		self.featuredb = f.readlines()
 		f.close()
-                self.maxshape =200
+                self.maxshape = data_shape[0]
 		self.total= len(self.featuredb)
 		self.num_classes = num_classes
                 self.cur =0
-
+                self.phase = phase
 		label = np.random.randint(0, 1, [self.batch_size, ])
 		data = np.random.uniform(-1, 1, [self.batch_size, data_shape[0],data_shape[1]])
 		self.data = [mx.nd.array(data, dtype=self.dtype)]
@@ -110,20 +107,27 @@ class FeaDataIter(mx.io.DataIter):
                 return 0
 
 	def next(self):
+                i =0
 		if self.iter_next():
 			self.get_batch()
 			self.cur += self.batch_size
 #			return self.im_info, \
+                        i+=1
 			return  mx.io.DataBatch(data=self.data, label=self.label,
 			                       pad=self.getpad(), index=self.getindex(),
 			                       provide_data=self.provide_data, provide_label=self.provide_label)
 		else:
+                    if not i :
+                        print(self.phase)
+                        self.reset()
 			raise StopIteration
 
 	def __next__(self):
 		return self.next()
 	def reset(self):
-		self.cur_iter = 0
+		self.cur = 0
+                import random 
+		random.shuffle(self.featuredb)
 
 
 	def get_data_label(self,iroidb):
@@ -141,7 +145,7 @@ class FeaDataIter(mx.io.DataIter):
                     if data.shape[0] > self.maxshape:
                         import random
                         radstart = random.randint(0, data.shape[0] - self.maxshape -1 )
-                        data_tensor = data[radstart:radstart+self.maxshape]
+                        data_tensor = data[radstart:radstart+self.maxshape,:]
                     else:
                         data_tensor[0:data.shape[0],:] = data
 #                   data_tensor[0,0,:,:] = data
@@ -200,11 +204,12 @@ class FeaDataIter(mx.io.DataIter):
 def netvlad(batchsize, num_centers, num_output,**kwargs):
 	input_data = mx.symbol.Variable(name="data")
         
-	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers,config.FEA_LEN),init = mx.init.Xavier())
+        input_data = mx.symbol.BatchNorm(input_data)
+	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers,config.FEA_LEN),init = mx.init.Normal(1))
 
         w = mx.symbol.Variable('weights_vlad',
                             shape=[num_centers, config.FEA_LEN],init= mx.initializer.Xavier())
-        b = mx.symbol.Variable('biases', shape=[1,num_centers],init = mx.initializer.Xavier())
+        b = mx.symbol.Variable('biases', shape=[1,num_centers],init = mx.initializer.Constant(1e-4))
 
        
 	weights = mx.symbol.dot(name='w', lhs=input_data, rhs = w, transpose_b = True)
@@ -281,14 +286,14 @@ def train():
 	load_epoch =0
         gpus = '0,1'
         top_k = 5
-        batch_size=32
-        disp_batches =10
+        batch_size= config.BATCH_SIZE
+        disp_batches = 50
 
         devs = mx.cpu() if gpus is None or gpus is '' else [
                 mx.gpu(int(i)) for i in gpus.split(',')]
 
-	train_data = FeaDataIter("new_train.txt",batch_size,devs,config.NUM_LABEL,(200,config.FEA_LEN))
-	val_data  = FeaDataIter("new_val.txt",batch_size,devs,config.NUM_LABEL,(200,config.FEA_LEN))
+	train_data = FeaDataIter("new_train.txt",batch_size,devs,config.NUM_LABEL,(config.MAX_SHAPE,config.FEA_LEN))
+	val_data  = FeaDataIter("new_val.txt",batch_size,devs,config.NUM_LABEL,(config.MAX_SHAPE,config.FEA_LEN),phase = 'val')
         print("loading data")
 	lr, lr_scheduler = _get_lr_scheduler(config.LEARNING_RATE, 0.1,0,'2,5',train_data.total)
 
