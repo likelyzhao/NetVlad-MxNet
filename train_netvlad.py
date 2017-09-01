@@ -5,12 +5,12 @@ import os
 from easydict import EasyDict as edict
 
 config = edict()
-config.NUM_VLAD_CENTERS = 32
+config.NUM_VLAD_CENTERS = 128
 config.NUM_LABEL =500
-config.LEARNING_RATE = 0.1
-config.FEA_LEN = 4096
+config.LEARNING_RATE = 1
+config.FEA_LEN = 1024
 config.MAX_SHAPE = 200
-config.BATCH_SIZE = 16
+config.BATCH_SIZE = 32
 
 def _save_model(model_prefix, rank=0):
 	import os
@@ -84,11 +84,12 @@ class FeaDataIter(mx.io.DataIter):
 		data = np.random.uniform(-1, 1, [self.batch_size, data_shape[0],data_shape[1]])
 		self.data = [mx.nd.array(data, dtype=self.dtype)]
 		self.label =[ mx.nd.array(label, dtype=self.dtype)]
+                self.reset()
 	def __iter__(self):
 		return self
 	@property
 	def provide_data(self):
-		return [mx.io.DataDesc('data', self.data[0].shape, self.dtype,'NTC')]
+		return [mx.io.DataDesc('data', self.data[0].shape, self.dtype,layout='NTC')]
 	@property
 	def provide_label(self):
                 #print(self.label[0].shape)
@@ -136,18 +137,32 @@ class FeaDataIter(mx.io.DataIter):
 		data_array =[]
 		for line in iroidb:
                     datapath  = line.split(',')[0]
-                    datapath = '/workspace/data/trainval/' + datapath +'_fc6_vgg19_frame.binary' 
+                    datapath = '/workspace/data/trainval/' + datapath +'_flatten_imagenet22k_frame.binary' 
 #                    label_tensor = np.zeros((1))
 #                    label_tensor[:] = int(line.split(",")[1])
-		    label_array.append([int(line.split(',')[1])])
+		    label_array.append([float(line.split(',')[1])])
                     data = np.fromfile(datapath,dtype='float32').reshape(-1,config.FEA_LEN)
+#                    for i in range(data.shape[0]):
+#                        row = data[i,:]
+#                        mean_r = np.mean(row)
+#                        var_r = np.var(row)
+                        #print(mean_r)
+#                        data[i,:] = (row-mean_r)/var_r
                     data_tensor = np.zeros((self.maxshape,data.shape[1]))
-                    if data.shape[0] > self.maxshape:
-                        import random
-                        radstart = random.randint(0, data.shape[0] - self.maxshape -1 )
-                        data_tensor = data[radstart:radstart+self.maxshape,:]
-                    else:
-                        data_tensor[0:data.shape[0],:] = data
+                    randidx =[]
+                    if data.shape[0] >0:
+                    	for i in range(self.maxshape):
+                            import random
+                            randidx.append(random.randint(0,data.shape[0]-1))
+               #     print(randidx)
+                        data_tensor = data[randidx,:]
+               #     print(data_tensor)
+            #        if data.shape[0] > self.maxshape:
+             #           import random
+              #          radstart = random.randint(0, data.shape[0] - self.maxshape -1 )
+               #         data_tensor = data[radstart:radstart+self.maxshape,:]
+                #    else:
+                #        data_tensor[0:data.shape[0],:] = data
 #                   data_tensor[0,0,:,:] = data
 #                    print(data_tensor.shape)
 		    data_array.append(data_tensor)
@@ -192,7 +207,7 @@ class FeaDataIter(mx.io.DataIter):
                     # print(label)
                     batch_label[i] = label
 #		label_tensor = [batch for batch in label_list]
-
+       #         print(batch_label)
 
 		self.data =[mx.nd.array([batch for batch in data_tensor])]
 #                print('data finish')
@@ -204,16 +219,16 @@ class FeaDataIter(mx.io.DataIter):
 def netvlad(batchsize, num_centers, num_output,**kwargs):
 	input_data = mx.symbol.Variable(name="data")
         
-        input_data = mx.symbol.BatchNorm(input_data)
+#        input_data = mx.symbol.BatchNorm(input_data)
 	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers,config.FEA_LEN),init = mx.init.Normal(1))
 
         w = mx.symbol.Variable('weights_vlad',
-                            shape=[num_centers, config.FEA_LEN],init= mx.initializer.Xavier())
+                            shape=[num_centers, config.FEA_LEN],init= mx.initializer.Normal(0.1))
         b = mx.symbol.Variable('biases', shape=[1,num_centers],init = mx.initializer.Constant(1e-4))
 
        
 	weights = mx.symbol.dot(name='w', lhs=input_data, rhs = w, transpose_b = True)
-        weights = mx.symbol.broadcast_sub(weights,b)
+        weights = mx.symbol.broadcast_add(weights,b)
 
 	softmax_weights = mx.symbol.softmax(data=weights, axis=2,name='softmax_vald')
 #	softmax_weights = mx.symbol.SoftmaxOutput(data=weights, axis=0,name='softmax_vald')
@@ -221,22 +236,25 @@ def netvlad(batchsize, num_centers, num_output,**kwargs):
 	vari_lib =[]
 
 	for i in range(num_centers):
-		y = mx.symbol.slice_axis(data=input_centers,axis=0,begin=i,end=i+1)
-		temp_w = mx.symbol.slice_axis(data=softmax_weights,axis=2,begin=i,end=i+1)
-		element_sub = mx.symbol.broadcast_sub(input_data, y)
-		vari_lib.append(mx.symbol.batch_dot(element_sub, temp_w,transpose_a = True))
+		y = mx.symbol.slice_axis(name= 'slice_center_{}'.format(i),data=input_centers,axis=0,begin=i,end=i+1)
+		temp_w = mx.symbol.slice_axis(name= 'temp_w_{}'.format(i),data=softmax_weights,axis=2,begin=i,end=i+1)
+		element_sub = mx.symbol.broadcast_sub(input_data, y,name='cast_sub_{}'.format(i))
+		vari_lib.append(mx.symbol.batch_dot(element_sub, temp_w,transpose_a = True,name='batch_dot_{}'.format(i)))
 
-       
+   #     group = mx.sym.Group(vari_lib)
+        concat = []
+        concat.append(vari_lib[0])
+#        concat = mx.symbol.concat(data= vari_lib,dim=2,num_args=5,name = 'concat')
 	for i in range(len(vari_lib)-1):
-	    vari_lib[0] =mx.symbol.concat(vari_lib[0],vari_lib[i+1],dim=2)
-
+	    concat.append(mx.symbol.concat(concat[i],vari_lib[i+1],dim=2,name = 'concat_{}'.format(i)))
         
-	norm = mx.symbol.L2Normalization(vari_lib[0],mode='instance')
+	norm = mx.symbol.L2Normalization(concat[len(concat)-1],mode='channel')
 	norm = mx.symbol.Flatten(norm)
+#        norm = mx.symbol.max(input_data,axis =1)
 	norm = mx.symbol.L2Normalization(norm)
 
-	weights = mx.symbol.FullyConnected(name='w', data=norm, num_hidden=num_output)
-	softmax_label = mx.symbol.SoftmaxOutput(data=weights,name='softmax')
+	weights_out = mx.symbol.FullyConnected(name='w_pre', data=norm, num_hidden=num_output)
+	softmax_label = mx.symbol.SoftmaxOutput(data=weights_out,name='softmax')
 
 #	group = mx.symbol.Group([softmax_label, mx.symbol.BlockGrad(softmax_weights)])
 
@@ -280,11 +298,11 @@ def train():
 
 	model_prefix = 'model/netvlad'
 	optimizer = 'sgd'
-	wd =0.05
+	wd =0.00000005
 
 
 	load_epoch =0
-        gpus = '0,1'
+        gpus = '0,1,2,3'
         top_k = 5
         batch_size= config.BATCH_SIZE
         disp_batches = 50
@@ -295,15 +313,21 @@ def train():
 	train_data = FeaDataIter("new_train.txt",batch_size,devs,config.NUM_LABEL,(config.MAX_SHAPE,config.FEA_LEN))
 	val_data  = FeaDataIter("new_val.txt",batch_size,devs,config.NUM_LABEL,(config.MAX_SHAPE,config.FEA_LEN),phase = 'val')
         print("loading data")
-	lr, lr_scheduler = _get_lr_scheduler(config.LEARNING_RATE, 0.1,0,'2,5',train_data.total)
+	lr, lr_scheduler = _get_lr_scheduler(config.LEARNING_RATE, 0.1,0,'5,20,50',train_data.total)
 
 	optimizer_params = {
 		'learning_rate': lr,
 		'wd': wd,
-		'lr_scheduler': lr_scheduler}
+		'lr_scheduler': lr_scheduler,
+		'momentum':0.9}
 
 	checkpoint = _save_model(model_prefix, kv.rank)
         sym_vlad = netvlad(batch_size,config.NUM_VLAD_CENTERS,config.NUM_LABEL)
+        sym_vlad.save('symbol.txt')
+        print(sym_vlad.get_internals())
+ #       print(sym_vlad.get_internals()['softmax_vald' + '_output'].infer_shape_partial(data=(32,200,1024)))
+ #       print(type(sym_vlad.get_internals))
+ #       return
 
 #	data_shape_dict = dict(train_data.provide_data + train_data.provide_label)
 #	data_shape_dict = dict(train_data.provide_data)
@@ -347,7 +371,7 @@ def train():
 
 	model.fit(train_data,
 			  begin_epoch=load_epoch if load_epoch else 0,
-			  num_epoch=10,
+			  num_epoch=100,
 			  eval_data=val_data,
 			  eval_metric=eval_metrics,
 			  kvstore=kv_store,
