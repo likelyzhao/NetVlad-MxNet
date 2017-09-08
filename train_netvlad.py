@@ -3,14 +3,14 @@ import numpy as np
 import os
 
 from easydict import EasyDict as edict
-
+Flag_contiue  =1
 config = edict()
 config.NUM_VLAD_CENTERS = 128
 config.NUM_LABEL =500
 config.LEARNING_RATE = 1
-config.FEA_LEN = 1024
+config.FEA_LEN = 2048
 config.MAX_SHAPE = 200
-config.BATCH_SIZE = 32
+config.BATCH_SIZE = 80
 
 def _save_model(model_prefix, rank=0):
 	import os
@@ -137,10 +137,10 @@ class FeaDataIter(mx.io.DataIter):
 		data_array =[]
 		for line in iroidb:
                     datapath  = line.split(',')[0]
-                    datapath = '/workspace/data/trainval/' + datapath +'_flatten_imagenet22k_frame.binary' 
+                    datapath = 'downloads/feat_senet/' + datapath +'_pool5_senet.binary' 
 #                    label_tensor = np.zeros((1))
 #                    label_tensor[:] = int(line.split(",")[1])
-		    label_array.append([float(line.split(',')[1])])
+		    label_array.append([float(line.split(',')[1])-1])
                     data = np.fromfile(datapath,dtype='float32').reshape(-1,config.FEA_LEN)
 #                    for i in range(data.shape[0]):
 #                        row = data[i,:]
@@ -343,7 +343,7 @@ def train():
 	initializer = mx.init.Xavier(
 		rnd_type='gaussian', factor_type="in", magnitude=2)
 
-	eval_metrics = ['accuracy']
+	eval_metrics = ['crossentropy','accuracy']
 	if top_k > 0:
 	    eval_metrics.append(mx.metric.create('top_k_accuracy', top_k=top_k))
 
@@ -353,6 +353,7 @@ def train():
 	batch_end_callbacks = mx.callback.Speedometer(batch_size, disp_batches)
 
 #	monitor = mx.mon.Monitor(args.monitor, pattern=".*") if args.monitor > 0 else None
+
 	monitor = None
 
 #	data_shape_dict = dict(train_data.provide_data + train_data.provide_label)
@@ -366,10 +367,28 @@ def train():
 #	out_shape_dict = dict(zip(train_data.list_outputs(), out_shape))
 #	aux_shape_dict = dict(zip(train_data.list_auxiliary_states(), aux_shape))
 
-#	sym,arg_params,aux_params = _load_model()
+        if  Flag_contiue == True:
+            load_epoch =17
+	    sym, arg_params, aux_params = mx.model.load_checkpoint(model_prefix, load_epoch)
+            model.fit(train_data,
+			  begin_epoch=load_epoch if load_epoch else 0,
+			  num_epoch=100,
+			  eval_data=val_data,
+			  eval_metric=eval_metrics,
+			  kvstore=kv_store,
+			  optimizer=optimizer,
+			  optimizer_params=optimizer_params,
+			  initializer=initializer,
+			  arg_params=arg_params,
+			  aux_params=aux_params,
+			  batch_end_callback=batch_end_callbacks,
+			  epoch_end_callback=checkpoint,
+			  allow_missing=True,
+			  monitor=monitor)
 
+        else:
 
-	model.fit(train_data,
+	    model.fit(train_data,
 			  begin_epoch=load_epoch if load_epoch else 0,
 			  num_epoch=100,
 			  eval_data=val_data,
