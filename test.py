@@ -1,10 +1,10 @@
 import os 
-TrainPath = 'lsvc2017/lsvc_train.txt'
+TrainPath = 'lsvc2017/lsvc_val.txt'
 f = open(TrainPath)
-fout = open('new_train.txt','w')
+fout = open('new_val.txt','w')
 for line in f.readlines(): 
     contents = line.strip().split(',')
-    datapath = 'downloads/feat_senet/' + contents[0] +'_pool5_senet.binary'
+    datapath = '/workspace/data/trainval/' + contents[0] +'_pool5_senet.binary'
     if not os.path.exists(datapath):
         print(contents[0])
         continue
