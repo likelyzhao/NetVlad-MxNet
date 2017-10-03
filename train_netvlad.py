@@ -3,14 +3,15 @@ import numpy as np
 import os
 
 from easydict import EasyDict as edict
-Flag_contiue  =True
+Flag_contiue  =False
 config = edict()
 config.NUM_VLAD_CENTERS = 128
 config.NUM_LABEL =500
 config.LEARNING_RATE = 1
 config.FEA_LEN = 512
 config.MAX_SHAPE = 800
-config.BATCH_SIZE = 80
+config.BATCH_SIZE = 32
+config.DROP_OUT_RATIO = 0
 
 def _save_model(model_prefix, rank=0):
 	import os
@@ -222,11 +223,11 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
 	input_data_four = mx.symbol.Reshape(data = input_data,shape=(0,-1,config.FEA_LEN/4))
 	input_data_eight = mx.symbol.Reshape(data = input_data,shape=(0,-1,config.FEA_LEN/8))
 #        input_data = mx.symbol.BatchNorm(input_data)
-	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers/8,config.FEA_LEN),init = mx.init.Normal(1))
+	input_centers = mx.symbol.Variable(name="centers",shape=(num_centers/2,config.FEA_LEN),init = mx.init.Normal(1))
 
         w = mx.symbol.Variable('weights_vlad',
-                            shape=[num_centers/8, config.FEA_LEN],init= mx.initializer.Normal(0.1))
-        b = mx.symbol.Variable('biases', shape=[1,num_centers/8],init = mx.initializer.Constant(1e-4))
+                            shape=[num_centers/2, config.FEA_LEN],init= mx.initializer.Normal(0.1))
+        b = mx.symbol.Variable('biases', shape=[1,num_centers/2],init = mx.initializer.Constant(1e-4))
 
        
 	weights = mx.symbol.dot(name='w', lhs=input_data, rhs = w, transpose_b = True)
@@ -237,7 +238,7 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
 
 	vari_lib =[]
 
-	for i in range(num_centers/8):
+	for i in range(num_centers/2):
 		y = mx.symbol.slice_axis(name= 'slice_center_{}'.format(i),data=input_centers,axis=0,begin=i,end=i+1)
 		temp_w = mx.symbol.slice_axis(name= 'temp_w_{}'.format(i),data=softmax_weights,axis=2,begin=i,end=i+1)
 		element_sub = mx.symbol.broadcast_sub(input_data, y,name='cast_sub_{}'.format(i))
@@ -252,13 +253,14 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
         
         netvlad_ori = concat[len(concat)-1]
 
+	netvlad_ori = mx.symbol.L2Normalization(netvlad_ori,mode='channel')
         netvlad_ori = mx.symbol.Reshape(data = netvlad_ori,shape=(0,-1,config.FEA_LEN))
-
-        input_centers_half = mx.symbol.Variable(name="centers_half",shape=(num_centers/8,config.FEA_LEN/2),init = mx.init.Normal(1))
+#################################original part ####################
+        input_centers_half = mx.symbol.Variable(name="centers_half",shape=(num_centers/2,config.FEA_LEN/2),init = mx.init.Normal(1))
 
         w_half = mx.symbol.Variable('weights_vlad_half',
-                            shape=[num_centers/8, config.FEA_LEN/2],init= mx.initializer.Normal(0.1))
-        b_half = mx.symbol.Variable('biases_half', shape=[1,num_centers/8],init = mx.initializer.Constant(1e-4))
+                            shape=[num_centers/2, config.FEA_LEN/2],init= mx.initializer.Normal(0.1))
+        b_half = mx.symbol.Variable('biases_half', shape=[1,num_centers/2],init = mx.initializer.Constant(1e-4))
 
 
         weights_half = mx.symbol.dot(name='w_half', lhs=input_data_half, rhs = w_half, transpose_b= True)
@@ -268,7 +270,7 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
 #       softmax_weights = mx.symbol.SoftmaxOutput(data=weights, axis=0,name='softmax_vald')
 
         vari_lib_half =[]
-        for i in range(num_centers/8):
+        for i in range(num_centers/2):
                 y_half = mx.symbol.slice_axis(name= 'slice_center_half_{}'.format(i),data=input_centers_half,axis=0,begin=i,end=i+1)
                 temp_w_half = mx.symbol.slice_axis(name= 'temp_w_half{}'.format(i),data=softmax_weights_half,axis=2,begin=i,end=i+1)
                 element_sub_half = mx.symbol.broadcast_sub(input_data_half, y_half,name='cast_sub_half_{}'.format(i))
@@ -283,6 +285,7 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
 
 
         netvlad_half = concat_half[len(concat_half)-1]
+	netvlad_half = mx.symbol.L2Normalization(netvlad_half,mode='channel')
         netvlad_half = mx.symbol.Reshape(data= netvlad_half,shape=(0,-1,config.FEA_LEN))
 ########################## 1/4 feature size #############################
 
@@ -315,14 +318,15 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
 
 
         netvlad_four = concat_four[len(concat_four)-1]
+	netvlad_four = mx.symbol.L2Normalization(netvlad_four,mode='channel')
         netvlad_four = mx.symbol.Reshape(data = netvlad_four,shape = (0,-1,config.FEA_LEN))
 ######################## 1/8 feature ##################################
 
-        input_centers_eight = mx.symbol.Variable(name="centers_eight",shape=(num_centers/4,config.FEA_LEN/8),init = mx.init.Normal(1))
+        input_centers_eight = mx.symbol.Variable(name="centers_eight",shape=(num_centers,config.FEA_LEN/8),init = mx.init.Normal(1))
 
         w_eight = mx.symbol.Variable('weights_vlad_eight',
-                            shape=[num_centers/4, config.FEA_LEN/8],init= mx.initializer.Normal(0.1))
-        b_eight = mx.symbol.Variable('biases_eight', shape=[1,num_centers/4],init = mx.initializer.Constant(1e-4))
+                            shape=[num_centers, config.FEA_LEN/8],init= mx.initializer.Normal(0.1))
+        b_eight = mx.symbol.Variable('biases_eight', shape=[1,num_centers],init = mx.initializer.Constant(1e-4))
 
 
         weights_eight = mx.symbol.dot(name='w_eight', lhs=input_data_eight, rhs = w_eight, transpose_b= True)
@@ -332,7 +336,7 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
 #       softmax_weights = mx.symbol.SoftmaxOutput(data=weights, axis=0,name='softmax_vald')
 
         vari_lib_eight =[]
-        for i in range(num_centers/4):
+        for i in range(num_centers):
                 y_eight = mx.symbol.slice_axis(name= 'slice_center_eight_{}'.format(i),data=input_centers_eight,axis=0,begin=i,end=i+1)
                 temp_w_eight = mx.symbol.slice_axis(name= 'temp_w_eight{}'.format(i),data=softmax_weights_eight,axis=2,begin=i,end=i+1)
                 element_sub_eight = mx.symbol.broadcast_sub(input_data_eight, y_eight,name='cast_sub_eight_{}'.format(i))
@@ -348,17 +352,19 @@ def netvlad_mutil(batchsize, num_centers, num_output,**kwargs):
 
         netvlad_eight = concat_eight[len(concat_eight)-1]
 
+	netvlad_eight = mx.symbol.L2Normalization(netvlad_eight,mode='channel')
         netvlad_eight = mx.symbol.Reshape(data = netvlad_eight,shape=(0,-1,config.FEA_LEN))
 
         norm = mx.symbol.concat(netvlad_ori,netvlad_half,netvlad_four,netvlad_eight,dim=1,name='total_concat')
 
 #        return norm
 
-	norm = mx.symbol.L2Normalization(norm,mode='channel')
+	#norm = mx.symbol.Flatten(norm)
+	#norm = mx.symbol.L2Normalization(norm,mode='channel')
 	norm = mx.symbol.Flatten(norm)
 #        norm = mx.symbol.max(input_data,axis =1)
 	norm = mx.symbol.L2Normalization(norm)
-	norm = mx.symbol.Dropout(norm,p=0.8)
+	norm = mx.symbol.Dropout(norm,p=config.DROP_OUT_RATIO)
 
 	weights_out = mx.symbol.FullyConnected(name='w_pre', data=norm, num_hidden=num_output)
 	softmax_label = mx.symbol.SoftmaxOutput(data=weights_out,name='softmax')
@@ -521,7 +527,7 @@ def train():
 #	aux_shape_dict = dict(zip(train_data.list_auxiliary_states(), aux_shape))
 
         if  Flag_contiue == True:
-            load_epoch =5
+            load_epoch =10
 	    sym, arg_params, aux_params = mx.model.load_checkpoint(model_prefix, load_epoch)
             model.fit(train_data,
 			  begin_epoch=load_epoch if load_epoch else 0,
